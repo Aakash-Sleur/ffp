@@ -1,0 +1,1182 @@
+"use client";
+
+import { Card } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import {
+  Zap,
+  Loader2,
+  Upload,
+  Trash2,
+  FileIcon,
+  FileText,
+  Maximize2,
+  Activity,
+  Check,
+  Wrench,
+  Expand,
+  Layers,
+  Edit,
+  BrainCog,
+  AlertTriangle,
+  CheckCircle2,
+} from "lucide-react";
+import { useCallback, useState } from "react";
+import { useDropzone } from "react-dropzone";
+import dynamic from "next/dynamic";
+import { ImageViewerModal } from "@/components/image-viewer-modal";
+import { CadViewer } from "@/components/cad/cad-viewer";
+import ExpandFileModal from "./expand-file-modal";
+import { EditPartModal } from "./edit-part-modal";
+// import { SheetMetalFields } from "./sheet-metal-fields";
+// import { SheetMetalLeadTimeBreakdown } from "./sheet-metal-lead-time-breakdown";
+import { useFileUpload } from "@/lib/hooks/use-file-upload";
+import { notify } from "@/lib/toast";
+import { calculateLeadTime } from "../[id]/page";
+import {
+  getProcessDisplayName,
+  // isCNCProcess,
+  isSheetMetalProcess,
+  // getDefaultMaterialForProcess,
+  // getDefaultFinishForProcess,
+  // getDefaultToleranceForProcess,
+  getMaterialDisplayName,
+} from "@/lib/pricing-engine";
+
+// Dynamically import PDF viewer to avoid SSR issues with DOMMatrix
+const PdfViewerModal = dynamic(
+  () =>
+    import("@/components/pdf-viewer-modal").then((mod) => mod.PdfViewerModal),
+  { ssr: false },
+);
+
+import {
+  PartConfig,
+  File2D,
+  MaterialItem,
+  ToleranceItem,
+  FinishItem,
+  InspectionItem,
+  ThreadItem,
+} from "@/types/part-config";
+import { apiClient } from "@/lib/api";
+import FileManagementModal from "./file-management-modal";
+import { formatCurrencyFixed, cn } from "@/lib/utils";
+import {
+  leadTimeMeta,
+  markupMap,
+  TWO_D_AND_IMAGE_MIME,
+  RFQPartStatus,
+} from "@cnc-quote/shared";
+import { Badge } from "@/components/ui/badge";
+import { useSuggestionContext } from "@/components/store/suggestion-store";
+import { PartStatusModal } from "./part-status-modal";
+
+// Valid sheet metal thicknesses in mm
+const VALID_SHEET_THICKNESSES = [
+  0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0,
+];
+
+// Helper to get valid sheet thickness (clamp bbox-derived values to valid sheet sizes)
+function getValidSheetThickness(part: PartConfig): number {
+  // Priority 1: User-configured sheet_thickness_mm
+  if (
+    part.sheet_thickness_mm &&
+    part.sheet_thickness_mm > 0 &&
+    part.sheet_thickness_mm <= 25
+  ) {
+    return part.sheet_thickness_mm;
+  }
+
+  // Priority 2: Geometry-detected thickness from advanced metrics (from CAD service ray-casting)
+  const advancedThickness = (part.geometry as any)?.advancedMetrics
+    ?.detected_thickness_mm;
+  if (advancedThickness && advancedThickness > 0 && advancedThickness <= 25) {
+    // Find closest standard thickness
+    const closest = VALID_SHEET_THICKNESSES.reduce((prev, curr) =>
+      Math.abs(curr - advancedThickness) < Math.abs(prev - advancedThickness)
+        ? curr
+        : prev,
+    );
+    return closest;
+  }
+
+  // Priority 3: SheetMetalFeatures thickness (may be from bbox - validate range)
+  const smThickness = part.geometry?.sheetMetalFeatures?.thickness;
+  if (smThickness && smThickness > 0 && smThickness <= 25) {
+    // Find closest standard thickness
+    const closest = VALID_SHEET_THICKNESSES.reduce((prev, curr) =>
+      Math.abs(curr - smThickness) < Math.abs(prev - smThickness) ? curr : prev,
+    );
+    return closest;
+  }
+
+  // Default to 2.0mm (matches AL5052-2.0 default material)
+  return 2.0;
+}
+
+// --- Sub-Component: PartCardItem ---
+export function PartCardItem({
+  part,
+  index,
+  updatePart,
+  updatePartFields,
+  handleDeletePart,
+  handleArchivePart,
+  calculatePrice,
+  MATERIALS_LIST,
+  TOLERANCES_LIST,
+  FINISHES_LIST,
+  THREAD_OPTIONS,
+  INSPECTIONS_OPTIONS,
+  isSelected,
+  onToggleSelection,
+  suggestionPart,
+  setSuggestionPart,
+}: {
+  part: PartConfig;
+  index: number;
+  updatePart: (
+    index: number,
+    field: keyof PartConfig,
+    value: any,
+    saveToDb?: boolean,
+  ) => void;
+  updatePartFields?: (
+    index: number,
+    updates: Partial<PartConfig>,
+    saveToDb?: boolean,
+  ) => void;
+  handleDeletePart: (index: number) => void;
+  handleArchivePart?: (partId: string) => void;
+  calculatePrice: (
+    part: PartConfig,
+    tier?: "economy" | "standard" | "expedited",
+  ) => number;
+  MATERIALS_LIST: MaterialItem[];
+  TOLERANCES_LIST: ToleranceItem[];
+  FINISHES_LIST: FinishItem[];
+  INSPECTIONS_OPTIONS: InspectionItem[];
+  THREAD_OPTIONS: ThreadItem[];
+  isSelected?: boolean;
+  onToggleSelection?: () => void;
+  suggestionPart: string;
+  setSuggestionPart: (part: string) => void;
+}) {
+  // const [isEditing, setIsEditing] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File2D | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isViewerOpen, setIsViewerOpen] = useState(false);
+  const [isPdfViewerOpen, setIsPdfViewerOpen] = useState(false);
+  const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
+  const [expandedFile, setExpandedFile] = useState<File | string | null>(null);
+
+  const { upload, uploadBase64 } = useFileUpload();
+  const { suggestionCountMap, setIsOpen } = useSuggestionContext();
+
+  const totalPrice = calculatePrice(part, part.leadTimeType);
+  const hasPriceIssue = totalPrice < 150;
+  const has2DIssue = !part.files2d || part.files2d.length === 0;
+  const hasCaution = hasPriceIssue || has2DIssue;
+
+  const onDrop = useCallback(
+    async (acceptedFiles: File[]) => {
+      if (acceptedFiles.length > 0) {
+        setIsUploading(true);
+        try {
+          const newFiles = await Promise.all(
+            acceptedFiles.map(async (file) => {
+              let preview = URL.createObjectURL(file);
+              try {
+                const { url } = await upload(file);
+                preview = url;
+              } catch (error) {
+                console.error("Failed to upload 2D file:", error);
+                notify.error(`Failed to upload ${file.name}`);
+              }
+              return {
+                file,
+                preview,
+              };
+            }),
+          );
+
+          const { data } = await apiClient.post(
+            `/rfq/${part.rfqId}/${part.id}/add-2d-drawings`,
+            {
+              drawings: newFiles.map((f) => ({
+                file_name: f.file.name,
+                file_url: f.preview,
+                mime_type: f.file.type,
+              })),
+            },
+          );
+
+          if (!data || !data.drawings) {
+            throw new Error("Failed to upload files");
+          }
+
+          const uploadedFiles = newFiles.map((f, i) => ({
+            ...f,
+            id: data.drawings[i]?.id,
+          }));
+
+          const currentFiles = part.files2d || [];
+          updatePart(index, "files2d", [...currentFiles, ...uploadedFiles]);
+        } catch (error) {
+          console.error("Error uploading files:", error);
+          notify.error("Failed to upload files");
+        } finally {
+          setIsUploading(false);
+        }
+      }
+    },
+    [index, updatePart, upload, part.files2d],
+  );
+
+  const { getRootProps, getInputProps } = useDropzone({
+    onDrop,
+    accept: TWO_D_AND_IMAGE_MIME,
+    multiple: true,
+  });
+
+  const handleFileClick = (file2d: File2D) => {
+    setSelectedFile(file2d);
+    const isPdf = file2d.file.type === "application/pdf";
+    setIsFilesModalOpen(false);
+    if (isPdf) {
+      setIsPdfViewerOpen(true);
+    } else {
+      setIsViewerOpen(true);
+    }
+  };
+
+  const handleDeleteFile = async (fileIndex: number) => {
+    const fileToDelete = part.files2d?.[fileIndex];
+    if (!fileToDelete) return;
+
+    const fileId =
+      "id" in fileToDelete.file ? fileToDelete.file.id : fileToDelete.id;
+
+    if (fileId) {
+      try {
+        await apiClient.delete(
+          `/rfq/${part.rfqId}/parts/${part.id}/drawings/${fileId}`,
+        );
+        notify.success("Drawing removed");
+      } catch (error) {
+        console.error("Failed to delete drawing", error);
+        notify.error("Failed to delete drawing");
+        return;
+      }
+    }
+
+    if (suggestionPart === part.id) setSuggestionPart("");
+
+    const currentFiles = part.files2d || [];
+    const updatedFiles = currentFiles.filter((_, i) => i !== fileIndex);
+    updatePart(index, "files2d", updatedFiles);
+  };
+
+  // Disable interactive controls for manual-quote parts
+  const isManual = part.process === "manual-quote";
+
+  const isProcessing =
+    part.status === RFQPartStatus.Queued ||
+    part.status === RFQPartStatus.Processing;
+
+  if (isProcessing) {
+    return <PartCardSkeleton fileName={part.fileName} part={part} />;
+  }
+
+  /* New Layout Design */
+  return (
+    <Card
+      className={`overflow-hidden border shadow-sm hover:shadow-md transition-all duration-300 bg-white group relative  ${isSelected ? "border-blue-500 ring-2 ring-blue-200" : "border-slate-200"}`}
+    >
+      <div className="absolute top-4 left-4 z-10">
+        <div
+          className={`w-6 h-6 rounded-md border-2 flex items-center justify-center cursor-pointer transition-all ${
+            isSelected
+              ? "bg-blue-600 border-blue-600"
+              : "bg-white border-slate-300 group-hover:border-blue-400"
+          }`}
+          onClick={onToggleSelection}
+        >
+          {isSelected && <Check className="w-4 h-4 text-white" />}
+        </div>
+      </div>
+
+      {/* Top Right Status Badge */}
+      <div className="absolute top-0 right-1 z-10">
+        {hasCaution ? (
+          <div
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsStatusModalOpen(true);
+            }}
+            className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-full bg-red-100 text-red-600 shadow-sm transition-all hover:scale-110 active:scale-95 border border-red-200"
+            title="Click to see issues"
+          >
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+        ) : (
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 shadow-sm border border-emerald-200">
+            <CheckCircle2 className="h-5 w-5" />
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col md:flex-row">
+        {/* LEFT SIDEBAR: Visuals, Pricing, Key Metrics */}
+        <div className="w-full md:w-[340px] bg-slate-50/80 border-b md:border-b-0 md:border-r border-slate-100 p-6 flex flex-col gap-6 flex-shrink-0">
+          {/* 3D Thumbnail */}
+          <div className="aspect-square w-full bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm relative hover:border-blue-400 transition-all duration-300">
+            <CadViewer
+              file={part.fileObject || part.filePath}
+              className="h-full w-full"
+              zoom={0.8}
+              showViewCube={false}
+              showHomeButton={false}
+              showFlatParts={false}
+              {...(!part.snapshot_2d_url && {
+                onSnapshot: async (snapshot) => {
+                  try {
+                    const { url } = await uploadBase64(
+                      snapshot,
+                      `${part.fileName}-snapshot.png`,
+                    );
+
+                    await apiClient.post(
+                      `/rfq/${part.rfqId}/part/${part.id}/upload-snapshot`,
+                      { snapshot: url },
+                    );
+
+                    updatePart(index, "snapshot_2d_url", url, false);
+                  } catch (error) {
+                    console.error("Failed to upload snapshot:", error);
+                  }
+                },
+              })}
+            />
+            {/* Overlay Badges */}
+            <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
+              {part.geometry && !isManual && (
+                <span className="bg-black/70 backdrop-blur-sm text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                  {part.geometry.volume.toFixed(2)} mm³
+                </span>
+              )}
+            </div>
+
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpandedFile(part.fileObject || part.filePath || null);
+              }}
+              className="absolute bottom-4 right-4 rounded-full bg-black/10 p-2 text-black backdrop-blur-sm transition-colors hover:bg-black/20"
+              title="Expand View"
+            >
+              <Expand className="w-5 h-5 text-black" fill="#000" />
+            </button>
+          </div>
+
+          {!isManual && (
+            <>
+              {part.files2d && part.files2d.length > 0 ? (
+                <div className="space-y-3">
+                  {/* Show first 2 files */}
+                  {part.files2d.slice(0, 1).map((file2d, fileIndex) => {
+                    const isPdfFile = file2d.file.type === "application/pdf";
+                    return (
+                      <div
+                        key={fileIndex}
+                        className="flex items-center gap-4 cursor-pointer group hover:bg-blue-50/50 p-3 rounded-lg transition-all border border-transparent hover:border-blue-200"
+                        onClick={() => handleFileClick(file2d)}
+                      >
+                        <div className="relative overflow-hidden rounded-md border border-slate-200 bg-white h-16 w-16 sm:h-20 sm:w-20 flex-shrink-0 flex items-center justify-center">
+                          {isPdfFile ? (
+                            <FileText className="w-8 h-8 text-red-500" />
+                          ) : (
+                            <img
+                              src={file2d.preview}
+                              alt="Technical Drawing"
+                              className="object-contain max-h-full max-w-full p-1"
+                            />
+                          )}
+                          <div className="absolute inset-0 bg-blue-900/0 group-hover:bg-blue-900/10 transition-colors flex items-center justify-center">
+                            <Maximize2 className="w-5 h-5 text-blue-600 opacity-0 group-hover:opacity-100 transform scale-75 group-hover:scale-100 transition-all" />
+                          </div>
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className="text-sm font-bold text-slate-900 truncate mb-0.5">
+                            {file2d.file.name}
+                          </h4>
+                          <div className="flex items-center gap-2 mb-1">
+                            {isPdfFile && (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700 uppercase tracking-wider">
+                                PDF
+                              </span>
+                            )}
+                            <p className="text-[10px] font-semibold text-blue-600 flex items-center gap-1 uppercase tracking-wider">
+                              <Maximize2 className="w-2.5 h-2.5" /> Preview
+                            </p>
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="text-slate-400 hover:text-red-500 hover:bg-red-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteFile(fileIndex);
+                          }}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+
+                  {/* Show More Button if more than 1 file */}
+                  {part.files2d.length > 1 && (
+                    <Button
+                      variant="outline"
+                      className="w-full border-blue-200 text-blue-600 hover:bg-blue-50 hover:border-blue-300"
+                      onClick={() => setIsFilesModalOpen(true)}
+                    >
+                      <FileIcon className="w-4 h-4 mr-2" />
+                      Show all {part.files2d.length} files
+                    </Button>
+                  )}
+
+                  {/* Add More Files Button */}
+                  <div
+                    {...getRootProps()}
+                    className="border border-dashed border-slate-300 rounded-lg p-4 bg-slate-50/50 hover:bg-slate-50 hover:border-blue-400 transition-all cursor-pointer text-center group flex flex-col items-center justify-center gap-2"
+                  >
+                    <input
+                      {...getInputProps()}
+                      key={`file-input-${part.files2d?.length || 0}`}
+                    />
+                    {isUploading ? (
+                      <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 bg-white rounded-full border border-slate-200 shadow-sm group-hover:border-blue-300">
+                          <Upload className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-500" />
+                        </div>
+                        <p className="text-xs font-medium text-slate-600 group-hover:text-blue-700 transition-colors">
+                          Add More Files
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div
+                  {...getRootProps()}
+                  className={cn(
+                    "border-2 border-dashed rounded-xl p-8 transition-all cursor-pointer text-center group flex flex-col items-center justify-center gap-3 relative overflow-hidden",
+                    has2DIssue
+                      ? "border-red-200 bg-red-50/30 hover:bg-red-50/50 hover:border-red-400 shadow-[0_0_25px_rgba(239,68,68,0.15)] ring-4 ring-red-500/5"
+                      : "border-slate-300 bg-slate-50/50 hover:bg-slate-50 hover:border-blue-400",
+                  )}
+                >
+                  {has2DIssue && (
+                    <div className="absolute top-3 right-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500 text-white shadow-lg shadow-red-200/50">
+                      <AlertTriangle className="w-3 h-3" />
+                      <span className="text-[10px] font-black uppercase tracking-wider">
+                        Mandatory
+                      </span>
+                    </div>
+                  )}
+                  <input {...getInputProps()} />
+                  {isUploading ? (
+                    <div className="flex flex-col items-center justify-center">
+                      <Loader2 className="w-8 h-8 text-blue-600 animate-spin mb-2" />
+                      <p className="text-sm font-medium text-blue-600">
+                        Uploading...
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div
+                        className={cn(
+                          "p-2 bg-white rounded-full border shadow-sm transition-colors",
+                          has2DIssue
+                            ? "border-red-200 group-hover:border-red-300"
+                            : "border-slate-200 group-hover:border-blue-300",
+                        )}
+                      >
+                        <Upload
+                          className={cn(
+                            "w-4 h-4 transition-colors",
+                            has2DIssue
+                              ? "text-red-400 group-hover:text-red-500"
+                              : "text-slate-400 group-hover:text-blue-500",
+                          )}
+                        />
+                      </div>
+                      <p
+                        className={cn(
+                          "text-xs font-medium transition-colors",
+                          has2DIssue
+                            ? "text-red-600 group-hover:text-red-700"
+                            : "text-slate-600 group-hover:text-blue-700",
+                        )}
+                      >
+                        Upload 2D Drawings{" "}
+                        {has2DIssue && (
+                          <span className="text-red-500 font-bold ml-0.5">
+                            *
+                          </span>
+                        )}
+                        <br />
+                        <span className="text-slate-400 font-normal">
+                          (PDF, JPG, PNG, DXF, DWG - Multiple files supported)
+                        </span>
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* RIGHT MAIN CONTENT: Configuration & Details */}
+        <div className="flex-1 p-6 lg:p-8 flex flex-col min-w-0">
+          {/* Header Section */}
+          <div className="flex flex-col gap-6 mb-1 pb-4">
+            {/* Top Row: Title, Index & Actions */}
+            <div className="flex flex-col w-full gap-5">
+              {/* Row 1: Identity & Meta Actions */}
+              <div className="flex items-start justify-between w-full gap-4">
+                <div className="flex items-start gap-4 min-w-0 flex-1">
+                  {/* Index */}
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-base font-black text-white shadow-md ring-4 ring-blue-50">
+                    {index + 1}
+                  </div>
+                  <div className="min-w-0 flex flex-col gap-1.5 pt-0.5">
+                    <h3 className="truncate text-xl font-black tracking-tight text-slate-900 leading-tight">
+                      {part.fileName}
+                    </h3>
+
+                    {/* Badges */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      {/* Process Badge - Dynamic based on part.process */}
+                      <div
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ring-1 ring-inset ${
+                          part.process === "manual-quote"
+                            ? "bg-purple-50 text-purple-700 ring-purple-200"
+                            : part.process === "sheet-metal" ||
+                                part.process?.includes("sheet")
+                              ? "bg-green-50 text-green-700 ring-green-200"
+                              : "bg-amber-50 text-amber-700 ring-amber-200"
+                        }`}
+                      >
+                        {part.process === "manual-quote" ? (
+                          <FileText className="h-3.5 w-3.5" />
+                        ) : part.process === "sheet-metal" ||
+                          part.process?.includes("sheet") ? (
+                          <Layers className="h-3.5 w-3.5" />
+                        ) : (
+                          <Zap className="h-3.5 w-3.5" />
+                        )}
+                        {getProcessDisplayName(part.process)}
+                      </div>
+
+                      {/* Custom */}
+                      <div className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-700 ring-1 ring-inset ring-slate-200">
+                        <Wrench className="h-3.5 w-3.5 text-slate-500" />
+                        Custom
+                      </div>
+
+                      {/* Geometry */}
+                      {part.geometry && (
+                        <div className="inline-flex items-center gap-1.5 rounded-md bg-blue-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-700 ring-1 ring-inset ring-blue-200">
+                          <Activity className="h-3.5 w-3.5 text-blue-400" />
+                          {part.geometry.complexity}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0 ml-2">
+                  <div className="relative">
+                    {(suggestionCountMap.get(part.id) || 0) > 0 && (
+                      <Badge
+                        variant="warning"
+                        className="absolute -top-1.5 -right-1.5 h-5 min-w-[20px] flex items-center justify-center p-0.5 rounded-full border-2 border-white shadow-sm text-[10px] font-bold z-20"
+                      >
+                        {suggestionCountMap.get(part.id)}
+                      </Badge>
+                    )}
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setSuggestionPart(part.id);
+                        setIsOpen(true);
+                      }}
+                      title="Part Suggestions"
+                      size="icon"
+                      className={cn(
+                        "h-9 w-9 rounded-lg border-slate-200 text-slate-400 transition-all overflow-hidden relative group",
+                        (suggestionCountMap.get(part.id) || 0) > 0
+                          ? "animated-gradient-btn border-transparent text-white shadow-[0_0_15px_rgba(59,130,246,0.5)] hover:shadow-[0_0_20px_rgba(59,130,246,0.7)] hover:scale-110"
+                          : "hover:border-amber-400 hover:bg-amber-50 hover:text-amber-700",
+                      )}
+                    >
+                      {(suggestionCountMap.get(part.id) || 0) > 0 && (
+                        <>
+                          <div className="absolute inset-0 bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          <div className="absolute inset-0 pulse-glow bg-blue-400/20 rounded-lg" />
+                        </>
+                      )}
+                      <BrainCog
+                        className={cn(
+                          "h-4 w-4 relative z-10",
+                          (suggestionCountMap.get(part.id) || 0) > 0 &&
+                            "text-white",
+                        )}
+                      />
+                    </Button>
+                  </div>
+
+                  {/* Destructive (Delete) */}
+                  <Button
+                    variant="outline"
+                    onClick={() => handleDeletePart(index)}
+                    title="Delete Part"
+                    size="icon"
+                    className="
+                      h-9 w-9 rounded-lg
+                      border-slate-200 text-slate-400
+                      hover:border-red-500 hover:bg-red-50 hover:text-red-600
+                      transition-all
+                    "
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              {/* Row 2: Quantity & Configure Actions */}
+            </div>
+          </div>
+          <div className="flex item-center">
+            {!isManual && (
+              <div className="flex flex-col items-start gap-3 w-full justify-between">
+                <Button
+                  variant="blueCta"
+                  onClick={() => setIsEditModalOpen(true)}
+                  title="Configure Part"
+                  disabled={isManual}
+                  className="
+                      h-11 px-5 gap-2.5 rounded-xl
+                      border-slate-300 text-slate-700
+                      bg-white shadow-sm
+                      hover:border-blue-500 hover:text-blue-700 hover:bg-blue-50
+                      focus-visible:ring-2 focus-visible:ring-blue-500
+                      group
+                    "
+                >
+                  <Edit
+                    stroke="white"
+                    className="h-4.5 w-4.5 text-white group-hover:text-blue-600 transition-colors"
+                  />
+                  <span className="text-xs text-white ml-1 font-bold tracking-wide">
+                    Edit Specification
+                  </span>
+                </Button>
+                {/* Action Buttons: Standardized h-11 */}
+                <div
+                  className={`flex h-11 items-center rounded-xl border border-slate-200 bg-white px-2 shadow-sm transition-all hover:border-blue-200 ${isManual ? "opacity-60 cursor-not-allowed" : ""}`}
+                >
+                  {/* Label */}
+                  <span className="mx-2 text-[10px] font-black uppercase tracking-widest text-slate-400">
+                    Qty
+                  </span>
+
+                  {/* Stepper */}
+                  <div className="flex items-center rounded-lg bg-slate-50 p-0.5 ml-1">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      disabled={isManual}
+                      className="h-7 w-7 rounded-md text-slate-500 disabled:bg-gray-700 disabled:text-white hover:bg-white hover:text-blue-600 transition-colors shadow-sm"
+                      onClick={() => {
+                        if (isManual) return;
+                        const newQ = part.quantity - 1;
+                        if (newQ >= 1)
+                          updatePart(index, "quantity", newQ, false);
+                      }}
+                    >
+                      <span className="text-sm font-bold leading-none">−</span>
+                    </Button>
+
+                    <input
+                      type="number"
+                      value={part.quantity}
+                      onChange={(e) => {
+                        if (isManual) return;
+                        const val = parseInt(e.target.value || "1");
+                        if (!isNaN(val) && val >= 1) {
+                          updatePart(index, "quantity", val, false);
+                        }
+                      }}
+                      className="mx-1 w-12 bg-transparent text-center text-sm font-bold text-slate-900 focus:outline-none"
+                      min="1"
+                      disabled={isManual}
+                    />
+
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      disabled={isManual}
+                      className="h-7 w-7 rounded-md text-slate-500 hover:bg-white hover:text-blue-600 transition-colors shadow-sm"
+                      onClick={() => {
+                        if (isManual) return;
+                        updatePart(index, "quantity", part.quantity + 1, false);
+                      }}
+                    >
+                      <span className="text-sm font-bold leading-none">+</span>
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Content Area */}
+                <div className="flex-1">
+                  <div className="flex flex-col gap-2.5">
+                    {/* Process */}
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm font-bold text-slate-900">
+                        Process:
+                      </span>
+                      <span className="text-sm text-slate-600">
+                        {getProcessDisplayName(part.process)}
+                      </span>
+                    </div>
+
+                    {/* Material */}
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm font-bold text-slate-900">
+                        Material:
+                      </span>
+                      <span className="text-sm text-slate-600">
+                        {MATERIALS_LIST.find((m) => m.value === part.material)
+                          ?.label ||
+                          getMaterialDisplayName(part.material, part.process) ||
+                          "Not specified"}
+                      </span>
+                    </div>
+
+                    {/* Measurement */}
+                    {part.geometry && (
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-sm font-bold text-slate-900">
+                          Measurement:
+                        </span>
+                        <span className="text-sm text-slate-600">
+                          {part.geometry.boundingBox.x.toFixed(2)}mm ×{" "}
+                          {part.geometry.boundingBox.y.toFixed(2)}mm ×{" "}
+                          {part.geometry.boundingBox.z.toFixed(2)}mm
+                          {part.geometry.volume > 0 &&
+                            ` | ${part.geometry.volume.toFixed(0)} mm³`}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Finish */}
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm font-bold text-slate-900">
+                        Finish:
+                      </span>
+                      <span className="text-sm text-slate-600">
+                        {FINISHES_LIST.find((f) => f.value === part.finish)
+                          ?.label ||
+                          part.finish ||
+                          "As Machined"}
+                      </span>
+                    </div>
+
+                    {/* Tolerance / Thickness */}
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm font-bold text-slate-900">
+                        {isSheetMetalProcess(part.process)
+                          ? "Thickness:"
+                          : "Tolerance:"}
+                      </span>
+                      <span className="text-sm text-slate-600 capitalize">
+                        {isSheetMetalProcess(part.process)
+                          ? `${getValidSheetThickness(part)}mm`
+                          : part.tolerance || "Standard"}
+                      </span>
+                    </div>
+
+                    {/* Threads */}
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm font-bold text-slate-900">
+                        Threads and Tapped Holes:
+                      </span>
+                      <span className="text-sm text-slate-600">
+                        {THREAD_OPTIONS.find((t) => t.value === part.threads)
+                          ?.label ||
+                          part.threads ||
+                          "None"}
+                      </span>
+                    </div>
+
+                    {/* Inspection */}
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-sm font-bold text-slate-900">
+                        Inspection:
+                      </span>
+                      <span className="text-sm text-slate-600 capitalize">
+                        {INSPECTIONS_OPTIONS.find(
+                          (i) => i.value === part.inspection,
+                        )?.label ||
+                          part.inspection ||
+                          "Standard"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {part.process !== "manual-quote" ? (
+              <div className="flex flex-col xl:flex-row gap-8">
+                {/* Row 2: Lead Time Pricing Options */}
+                <div className="w-full xl:w-[240px] shrink-0">
+                  <div className="grid grid-cols-1 gap-3">
+                    {(["economy", "standard", "expedited"] as const).map(
+                      (leadTimeType) => {
+                        const realPrice = calculatePrice(part, leadTimeType);
+                        const perPartPrice =
+                          calculatePrice(part, leadTimeType) / part.quantity;
+
+                        const uplift = markupMap[leadTimeType];
+                        const marketingPrice = realPrice * (1 + uplift);
+
+                        const isSelected = part.leadTimeType === leadTimeType;
+                        const icon = `/icons/${leadTimeType}.png`;
+                        const leadTime = calculateLeadTime(part, leadTimeType);
+
+                        return (
+                          <div
+                            key={leadTimeType}
+                            onClick={() =>
+                              updatePart(
+                                index,
+                                "leadTimeType",
+                                leadTimeType,
+                                false,
+                              )
+                            }
+                            className={`
+                              relative cursor-pointer rounded-xl sm:rounded-2xl
+                              border p-3 transition-all
+                              active:scale-[0.98]
+                              ${
+                                isSelected
+                                  ? "border-blue-600 bg-blue-50 ring-2 ring-blue-600"
+                                  : "border-slate-200 bg-white hover:border-slate-300 hover:shadow-sm"
+                              }
+                            `}
+                          >
+                            {/* Badge */}
+                            <div className="absolute right-2 top-2 sm:-right-3 sm:-top-2">
+                              <span
+                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide
+                                ${
+                                  isSelected
+                                    ? "bg-blue-100 text-blue-700"
+                                    : "bg-slate-200 text-slate-600"
+                                }
+                              `}
+                              >
+                                {leadTimeMeta[leadTimeType].badge}
+                              </span>
+                            </div>
+
+                            {/* Header */}
+                            <div className="mb-3 sm:mb-4 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+                              <img
+                                src={icon}
+                                alt=""
+                                className="h-8 w-8 sm:h-9 sm:w-9 shrink-0"
+                              />
+
+                              <div className="leading-tight">
+                                <div className="text-sm font-semibold capitalize text-slate-700">
+                                  {leadTimeType}
+                                </div>
+                                <div className="text-xs text-slate-400">
+                                  {leadTime} Business Days
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Pricing */}
+                            <div className="space-y-1">
+                              <div
+                                className={`text-xl sm:text-2xl font-bold leading-none ${
+                                  isSelected
+                                    ? "text-blue-700"
+                                    : "text-slate-700"
+                                }`}
+                              >
+                                {formatCurrencyFixed(realPrice)}
+                                <span className={"text-xs ml-2 text-blue-700"}>
+                                  ({formatCurrencyFixed(perPartPrice)} ea)
+                                </span>
+                              </div>
+                              <div className="flex items-baseline gap-x-2">
+                                <div className="text-xs sm:text-sm text-red-500 line-through decoration-dashed">
+                                  {formatCurrencyFixed(marketingPrice)}
+                                </div>
+                                <div className="text-xs text-slate-500">
+                                  Save{" "}
+                                  <span className="font-semibold text-green-700">
+                                    {formatCurrencyFixed(
+                                      marketingPrice - realPrice,
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      },
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="relative overflow-hidden rounded-2xl border border-purple-200/50 bg-white p-[1px] shadow-xl shadow-purple-500/10">
+                  {/* The "Glow" background */}
+                  <div className="absolute -left-10 -top-10 h-32 w-32 bg-purple-200/50 blur-3xl" />
+
+                  <div className="relative flex items-center gap-5 rounded-[15px] bg-white/80 backdrop-blur-sm p-5">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 text-white shadow-lg shadow-purple-200">
+                      <FileText size={24} strokeWidth={2.5} />
+                    </div>
+
+                    <div className="flex flex-col gap-1">
+                      <div className="mb-1 flex items-center gap-2">
+                        <span className="text-[10px] font-black uppercase tracking-[0.2em] text-purple-600/70">
+                          Status
+                        </span>
+                        <span className="h-[1px] flex-1 bg-slate-200" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="h-2 w-2 animate-pulse rounded-full bg-purple-500" />
+                        <h3 className="font-bold uppercase text-sm leading-relaxed tracking-tight text-slate-900">
+                          Manual review required
+                        </h3>
+                      </div>
+                      <p className="mt-1 text-xs uppercase text-slate-500">
+                        This file is unique. Our team will provide a
+                        <span className="mx-1 font-medium text-slate-900 underline decoration-purple-400 decoration-2 underline-offset-2">
+                          custom price
+                        </span>
+                        within 24 hours.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Sheet Metal Lead Time Breakdown - Hidden per user request */}
+          {/* Lead time breakdown and AI optimization removed for sheet metal parts */}
+        </div>
+      </div>
+      {/* Image Viewer for image files */}
+      <ImageViewerModal
+        isOpen={isViewerOpen && selectedFile?.file.type !== "application/pdf"}
+        onClose={() => {
+          setIsViewerOpen(false);
+          setSelectedFile(null);
+        }}
+        imageSrc={selectedFile?.preview || ""}
+        altText={selectedFile?.file.name || "Technical Drawing"}
+      />
+
+      {/* PDF Viewer for PDF files */}
+      <PdfViewerModal
+        isOpen={
+          isPdfViewerOpen && selectedFile?.file.type === "application/pdf"
+        }
+        onClose={() => {
+          setIsPdfViewerOpen(false);
+          setSelectedFile(null);
+        }}
+        pdfSrc={selectedFile?.preview || ""}
+        fileName={selectedFile?.file.name.replace(/\.pdf$/i, "") || "Document"}
+      />
+
+      {/* Files Management Modal */}
+      <FileManagementModal
+        isFilesModalOpen={isFilesModalOpen}
+        setIsFilesModalOpen={setIsFilesModalOpen}
+        part={part}
+        isUploading={isUploading}
+        handleDeleteFile={handleDeleteFile}
+        handleFileClick={handleFileClick}
+        getRootProps={getRootProps}
+        getInputProps={getInputProps}
+      />
+
+      <EditPartModal
+        isOpen={isEditModalOpen}
+        onClose={() => setIsEditModalOpen(false)}
+        part={part}
+        index={index}
+        updatePart={updatePart}
+        updatePartFields={updatePartFields}
+        calculatePrice={(
+          part: PartConfig,
+          leadTimeType: typeof part.leadTimeType,
+        ) => calculatePrice(part, leadTimeType)}
+        MATERIALS_LIST={MATERIALS_LIST}
+        TOLERANCES_LIST={TOLERANCES_LIST}
+        FINISHES_LIST={FINISHES_LIST}
+        THREAD_OPTIONS={THREAD_OPTIONS}
+        INSPECTIONS_OPTIONS={INSPECTIONS_OPTIONS}
+      />
+
+      {expandedFile && (
+        <ExpandFileModal
+          expandedFile={expandedFile}
+          setExpandedFile={setExpandedFile}
+          part={part}
+        />
+      )}
+
+      <PartStatusModal
+        isOpen={isStatusModalOpen}
+        onClose={() => setIsStatusModalOpen(false)}
+        snapshotUrl={part.snapshot_2d_url}
+        hasPriceIssue={hasPriceIssue}
+        has2DIssue={has2DIssue}
+        totalPrice={totalPrice}
+      />
+    </Card>
+  );
+}
+
+export function PartCardSkeleton({
+  fileName,
+  part,
+}: {
+  fileName: string;
+  part?: PartConfig;
+}) {
+  return (
+    <Card className="overflow-hidden border border-slate-200 shadow-sm bg-white relative">
+      <div className="flex flex-col md:flex-row">
+        {/* LEFT SIDEBAR SKELETON */}
+        <div className="w-full md:w-[340px] bg-slate-50/80 border-b md:border-b-0 md:border-r border-slate-100 p-6 flex flex-col gap-6 flex-shrink-0">
+          {part ? (
+            <div className="aspect-square w-full bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm relative">
+              <CadViewer
+                file={part.fileObject || part.filePath}
+                className="h-full w-full"
+                zoom={0.8}
+                showHomeButton={false}
+                showViewCube={false}
+                showFlatParts={false}
+              />
+            </div>
+          ) : (
+            <Skeleton className="aspect-square w-full rounded-xl" />
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Skeleton className="h-8 w-24 rounded-lg" />
+            <Skeleton className="h-8 w-24 rounded-lg" />
+            <Skeleton className="h-8 w-24 rounded-lg" />
+          </div>
+          <div className="space-y-3">
+            <Skeleton className="h-20 w-full rounded-lg" />
+            <Skeleton className="h-12 w-full rounded-lg border border-dashed border-slate-300" />
+          </div>
+        </div>
+
+        {/* RIGHT MAIN CONTENT SKELETON */}
+        <div className="flex-1 p-6 lg:p-8 flex flex-col min-w-0">
+          <div className="flex flex-col gap-6 mb-1 pb-4">
+            {/* Top Row: Title, Index & Actions */}
+            <div className="flex items-start justify-between w-full gap-4">
+              <div className="flex items-start gap-4 min-w-0 flex-1">
+                <Skeleton className="h-10 w-10 shrink-0 rounded-xl" />
+                <div className="min-w-0 flex flex-col gap-2 pt-0.5 w-full max-w-md">
+                  <div className="flex items-center gap-2">
+                    <h3 className="truncate text-xl font-black tracking-tight text-slate-900 leading-tight">
+                      {fileName}
+                    </h3>
+                    <Skeleton className="h-5 w-20 rounded-md" />
+                  </div>
+                  <div className="flex gap-2">
+                    <Skeleton className="h-6 w-24 rounded-md" />
+                    <Skeleton className="h-6 w-24 rounded-md" />
+                    <Skeleton className="h-6 w-24 rounded-md" />
+                  </div>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Skeleton className="h-9 w-9 rounded-lg" />
+                <Skeleton className="h-9 w-9 rounded-lg" />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-4 w-full">
+              <div className="flex items-center gap-3 w-full justify-between">
+                <Skeleton className="h-11 w-40 rounded-xl" />
+                <Skeleton className="h-11 w-32 rounded-xl" />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col xl:flex-row gap-8">
+            {/* Content Area */}
+            <div className="flex-1">
+              <div className="flex flex-col gap-3">
+                {[1, 2, 3, 4, 5, 6].map((i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="h-4 w-32" />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="w-full xl:w-[260px] flex flex-col gap-4 mt-4 xl:mt-0">
+              <Skeleton className="h-32 w-full rounded-2xl" />
+            </div>
+          </div>
+        </div>
+      </div>
+      {/* Uploading indicator overlay */}
+      <div className="absolute inset-0 bg-white/40 backdrop-blur-[1px] flex items-center justify-center z-20">
+        <div className="bg-white px-6 py-4 rounded-2xl shadow-xl border border-blue-100 flex items-center gap-4">
+          <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
+          <div className="flex flex-col">
+            <span className="font-bold text-slate-900">
+              {part ? "Analyzing Layout..." : "Uploading & Analyzing..."}
+            </span>
+            <span className="text-xs text-slate-500">
+              {part
+                ? "Running geometric feasibility checks"
+                : "Processing geometry data"}
+            </span>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}

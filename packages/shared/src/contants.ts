@@ -1,0 +1,521 @@
+/**
+ * Metadata keys used for decorators and reflection
+ */
+export enum MetaNames {
+  /** Key for storing role metadata in decorators */
+  rolesMetaKey = "roles",
+  /** Key for storing permission metadata in decorators */
+  permissionsMetaKey = "permissions",
+}
+
+// accepts file formats
+export const CAD_MIME_MAP = {
+  "model/stl": [".stl"],
+  "application/sla": [".stl"],
+  "application/vnd.ms-pki.stl": [".stl"],
+  "model/x.stl-binary": [".stl"],
+
+  "model/step": [".step", ".stp"],
+  "application/step": [".step", ".stp"],
+
+  "model/iges": [".iges", ".igs"],
+  "application/iges": [".iges", ".igs"],
+
+  "image/vnd.dxf": [".dxf"],
+  "application/dxf": [".dxf"],
+
+  "model/obj": [".obj"],
+
+  "application/octet-stream": [
+    ".stl",
+    ".step",
+    ".stp",
+    ".iges",
+    ".igs",
+    ".dxf",
+    ".obj",
+  ],
+};
+
+export const OrderPhases = [
+  "pending",
+  "backlog",
+  "preparation",
+  "production",
+  "post-production",
+  "shipping",
+  "completed",
+];
+
+export const TWO_D_AND_IMAGE_MIME = {
+  // --- 2D technical drawings ---
+  "application/pdf": [".pdf"],
+
+  // DXF
+  "image/vnd.dxf": [".dxf"],
+  "application/dxf": [".dxf"],
+
+  // DWG
+  "image/vnd.dwg": [".dwg"],
+  "application/acad": [".dwg"],
+
+  // SVG (vector drawings)
+  "image/svg+xml": [".svg"],
+
+  // --- Raster images ---
+  "image/png": [".png"],
+  "image/jpeg": [".jpg", ".jpeg"],
+  "image/webp": [".webp"],
+
+  // Fallback (many tools send this)
+  "application/octet-stream": [
+    ".pdf",
+    ".dxf",
+    ".dwg",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+  ],
+};
+
+/**
+ * Enum representing different types of stock materials
+ */
+
+export enum StockMaterial {
+  Block = "block",
+  Rod = "rod",
+  Plate = "plate",
+}
+
+export enum RFQPartStatus {
+  Queued = "queued",
+  Processing = "processing",
+  Processed = "processed",
+  Cancelled = "Cancelled",
+}
+
+export enum Tables {
+  /** Table storing user account information */
+  UserTable = "users",
+  /** Table storing organization details */
+  OrganizationTable = "organizations",
+  /** Table storing role definitions */
+  RolesTable = "roles",
+  /** Table storing permission definitions */
+  PermissionsTable = "permissions",
+  /** Junction table linking organizations with their general roles */
+  GeneralOrganizationRolesTable = "general_organization_roles",
+  /** Junction table linking roles with their permissions */
+  RolePermissionsTable = "role_permissions",
+  /** Table storing refresh tokens for authentication */
+  RefreshTokensTable = "refresh_tokens",
+
+  GeneralMaterialsTable = "general_materials",
+
+  MaterialCategories = "material_categories",
+
+  SupplierMaterials = "supplier_materials",
+
+  Warehouses = "warehouses",
+
+  MaterialTable = "material",
+
+  GeneralTolerancesTable = "general_tolerances",
+
+  RFQTable = "rfq",
+
+  RFQPartsTable = "rfq_parts",
+
+  RFQPartDrawing2DTable = "part_drawing_2d",
+
+  AbandonedRFQPartsTable = "abandoned_rfq_parts",
+
+  AbandonedPartDrawing2DTable = "abandoned_part_drawing_2d",
+
+  ShippingAddressTable = "shipping_addresses",
+
+  OrdersTable = "orders",
+
+  OrderPartsTable = "order_parts",
+
+  OrderPartStatusHistoryTable = "order_part_status_history",
+
+  OrderShippingTable = "order_shipping",
+
+  OrderPaymentsTable = "order_payments",
+
+  OrganizationAgreementsTable = "organization_agreements",
+
+  OrderDocumentsTable = "order_documents",
+
+  OrderStatusChangeRequests = "order_status_change_requests",
+
+  SupplierAssignments = "supplier_assignments",
+}
+
+export const LOGO_URL =
+  "https://frigate.ai/wp-content/uploads/2024/03/frigate_whitelogo.svg";
+
+/**
+ * Materialized view names for optimized queries
+ */
+export enum MaterializedViewNames {
+  /** Materialized view containing user permission codes for fast lookup */
+  userPermissionCodesMV = "user_permission_codes_mv",
+}
+
+export enum SQLFunctions {
+  userPermissionCodesMVRefresh = "refresh_user_permission_codes_mv",
+}
+
+/**
+ * Standard role names used in the system
+ */
+export enum RoleNames {
+  /** Administrator role with elevated privileges */
+  Admin = "admin",
+  /** Supplier role for vendor users */
+  Supplier = "supplier",
+  /** Customer role for end users */
+  Customer = "customer",
+}
+
+export type CurrencyType = "USD" | "INR";
+export type UnitType = "kg" | "tons" | "liters" | "pieces";
+
+/**
+ * Permission names following hierarchical naming convention
+ * Format: [domain].[action].[scope]
+ */
+export enum PermissionsNames {
+  /** Full administrative access to all system functions */
+  adminFullAccess = "admin.access.allmight",
+  /** Full access to organization-level functions */
+  organizationFullAccess = "org.access.allmight",
+
+  //   Warehouse permissions
+  warehouseFullAccess = "warehouse.access.allmight",
+  warehouseReadAccess = "warehouse.access.read",
+  warehouseWriteAccess = "warehouse.access.write",
+
+  //   Material permissions
+  materialReadAccess = "material.access.read",
+  materialWriteAccess = "material.access.write",
+}
+
+/**
+ * Permission aliases mapping for grouping related permissions
+ * Key: alias name, Value: array of permission names
+ *
+ * Example usage:
+ * PERMISSION_ALIASES['user_management'] = ['user.create', 'user.read', 'user.update']
+ */
+export const PERMISSION_ALIASES: Record<string, string[]> = {
+  // Warehouse permissions
+  "warehouse.access.read": [
+    PermissionsNames.adminFullAccess,
+    PermissionsNames.organizationFullAccess,
+    PermissionsNames.warehouseFullAccess,
+  ],
+  "warehouse.access.write": [
+    PermissionsNames.adminFullAccess,
+    PermissionsNames.organizationFullAccess,
+    PermissionsNames.warehouseFullAccess,
+  ],
+  "warehouse.access.allmight": [
+    PermissionsNames.adminFullAccess,
+    PermissionsNames.organizationFullAccess,
+    PermissionsNames.warehouseFullAccess,
+  ],
+
+  // Material permissions
+  "material.access.read": [
+    PermissionsNames.adminFullAccess,
+    PermissionsNames.organizationFullAccess,
+  ],
+  "material.access.write": [
+    PermissionsNames.adminFullAccess,
+    PermissionsNames.organizationFullAccess,
+  ],
+  "material.access.allmight": [
+    PermissionsNames.adminFullAccess,
+    PermissionsNames.organizationFullAccess,
+  ],
+};
+
+export const leadTimeMeta = {
+  economy: {
+    badge: "Best Value",
+    badgeClass: "bg-slate-100 text-slate-600",
+  },
+  standard: {
+    badge: "Most Popular",
+    badgeClass: "bg-blue-100 text-blue-700",
+  },
+  expedited: {
+    badge: "Fastest",
+    badgeClass: "bg-slate-100 text-slate-600",
+  },
+} as const;
+
+export const markupMap = {
+  economy: 0.2,
+  standard: 0.25,
+  expedited: 0.3,
+} as const;
+
+export const leadTypeStyles = {
+  economy: {
+    border: "border-emerald-600",
+    bg: "bg-emerald-50",
+    ring: "ring-emerald-600",
+    text: "text-emerald-700",
+  },
+  standard: {
+    border: "border-blue-600",
+    bg: "bg-blue-50",
+    ring: "ring-blue-600",
+    text: "text-blue-700",
+  },
+  expedited: {
+    border: "border-purple-600",
+    bg: "bg-purple-50",
+    ring: "ring-purple-600",
+    text: "text-purple-700",
+  },
+} as const;
+
+export enum SocialLinks {
+  YoutubeFFP = "https://www.youtube.com/@frigatemanufacturing?utm_source=ffp&utm_medium=ffp&utm_campaign=ffp",
+  YoutubeEmail = "https://www.youtube.com/@frigatemanufacturing?utm_source=ffp&utm_medium=email&utm_campaign=ffp-email",
+
+  LinkedinFFP = "https://www.linkedin.com/company/frigates/posts/?utm_source=ffp&utm_medium=ffp&utm_campaign=ffp",
+  LinkedinEmail = "https://www.linkedin.com/company/frigates/posts/?utm_source=ffp&utm_medium=email&utm_campaign=ffp-email",
+
+  XFFP = "https://x.com/Frigateindia/?utm_source=ffp&utm_medium=ffp&utm_campaign=ffp",
+  XEmail = "https://x.com/Frigateindia/?utm_source=ffp&utm_medium=email&utm_campaign=ffp-email",
+
+  FrigateOfficialSiteFFP = "https://frigate.ai/?utm_source=ffp&utm_medium=ffp&utm_campaign=ffp",
+  FrigateOfficialSiteEmail = "https://frigate.ai/?utm_source=ffp&utm_medium=email&utm_campaign=ffp-email",
+}
+
+export const metalTranslation = {
+  "aluminum-6061": "Aluminum 6061",
+  "aluminum-6063": "Aluminum 6063",
+  "aluminum-5052": "Aluminum 5052",
+  "aluminum-7075": "Aluminum 7075",
+  "aluminum-2024": "Aluminum 2024",
+
+  "carbon-steel-a36": "Carbon Steel A36",
+  "carbon-steel-1018": "Carbon Steel 1018",
+  "carbon-steel-1045": "Carbon Steel 1045",
+  "alloy-steel-4140": "Alloy Steel 4140",
+  "alloy-steel-4340": "Alloy Steel 4340",
+
+  "stainless-steel-304": "Stainless Steel 304",
+  "stainless-steel-316": "Stainless Steel 316",
+  "stainless-steel-321": "Stainless Steel 321",
+  "stainless-steel-410": "Stainless Steel 410",
+  "stainless-steel-430": "Stainless Steel 430",
+
+  "brass-c360": "Brass C360",
+  "brass-c260": "Brass C260",
+
+  "copper-c110": "Copper C110",
+  "copper-c101": "Copper C101",
+
+  "titanium-grade-2": "Titanium Grade 2",
+  "titanium-grade-5": "Titanium Grade 5 (Ti-6Al-4V)",
+
+  abs: "ABS",
+  "nylon-6": "Nylon 6",
+  "nylon-6-6": "Nylon 6/6",
+  polycarbonate: "Polycarbonate",
+  "delrin-acetal": "Delrin (Acetal)",
+  peek: "PEEK",
+  hdpe: "HDPE",
+  uhmw: "UHMW",
+
+  "inconel-625": "Inconel 625",
+  "inconel-718": "Inconel 718",
+  "monel-400": "Monel 400",
+  "tool-steel-d2": "Tool Steel D2",
+  "tool-steel-h13": "Tool Steel H13",
+};
+
+export const COUNTRIES = [
+  "Albania",
+  "Algeria",
+  "American Samoa",
+  "Andorra",
+  "Anguilla",
+  "Antigua and Barbuda",
+  "Argentina",
+  "Armenia",
+  "Aruba",
+  "Australia",
+  "Austria",
+  "Azerbaijan",
+  "Bahamas",
+  "Bahrain",
+  "Bangladesh",
+  "Barbados",
+  "Belgium",
+  "Belize",
+  "Bermuda",
+  "Bhutan",
+  "Bolivia",
+  "Bonaire, Sint Eustatius and Saba",
+  "Bosnia and Herzegovina",
+  "Botswana",
+  "Brazil",
+  "Brunei",
+  "Bulgaria",
+  "Cabo Verde",
+  "Cambodia",
+  "Canada",
+  "Cayman Islands",
+  "Chile",
+  "Colombia",
+  "Congo",
+  "Costa Rica",
+  "Croatia",
+  "Curaçao",
+  "Cyprus",
+  "Czechia",
+  "Côte d'Ivoire",
+  "Denmark",
+  "Dominica",
+  "Dominican Republic",
+  "Ecuador",
+  "El Salvador",
+  "Estonia",
+  "Eswatini",
+  "Ethiopia",
+  "Faroe Islands",
+  "Fiji",
+  "Finland",
+  "France",
+  "French Guiana",
+  "French Polynesia",
+  "Gabon",
+  "Georgia",
+  "Germany",
+  "Ghana",
+  "Gibraltar",
+  "Greece",
+  "Greenland",
+  "Grenada",
+  "Guadeloupe",
+  "Guam",
+  "Guatemala",
+  "Guernsey",
+  "Guyana",
+  "Honduras",
+  "Hungary",
+  "Iceland",
+  "India",
+  "Ireland",
+  "Isle of Man",
+  "Israel",
+  "Italy",
+  "Jamaica",
+  "Japan",
+  "Jersey",
+  "Jordan",
+  "Kenya",
+  "South Korea",
+  "Kuwait",
+  "Kyrgyzstan",
+  "Laos",
+  "Latvia",
+  "Lebanon",
+  "Liechtenstein",
+  "Lithuania",
+  "Luxembourg",
+  "Malaysia",
+  "Maldives",
+  "Malta",
+  "Marshall Islands",
+  "Martinique",
+  "Mauritius",
+  "Mayotte",
+  "Mexico",
+  "Micronesia",
+  "Moldova",
+  "Monaco",
+  "Mongolia",
+  "Montenegro",
+  "Montserrat",
+  "Morocco",
+  "Namibia",
+  "Nepal",
+  "Netherlands",
+  "New Caledonia",
+  "New Zealand",
+  "Nicaragua",
+  "Northern Mariana Islands",
+  "Norway",
+  "Oman",
+  "Palau",
+  "Palestine",
+  "Panama",
+  "Paraguay",
+  "Peru",
+  "Philippines",
+  "Poland",
+  "Portugal",
+  "Puerto Rico",
+  "Qatar",
+  "North Macedonia",
+  "Romania",
+  "Rwanda",
+  "Réunion",
+  "Saint Barthélemy",
+  "Saint Helena, Ascension and Tristan da Cunha",
+  "Saint Kitts and Nevis",
+  "Saint Lucia",
+  "Saint Martin",
+  "Saint Pierre and Miquelon",
+  "Saint Vincent and the Grenadines",
+  "Samoa",
+  "San Marino",
+  "Saudi Arabia",
+  "Senegal",
+  "Serbia",
+  "Seychelles",
+  "Singapore",
+  "Sint Maarten",
+  "Slovakia",
+  "Slovenia",
+  "South Africa",
+  "Spain",
+  "Sri Lanka",
+  "Suriname",
+  "Sweden",
+  "Switzerland",
+  "Taiwan",
+  "Tajikistan",
+  "Tanzania",
+  "Thailand",
+  "Tonga",
+  "Trinidad and Tobago",
+  "Tunisia",
+  "Turkey",
+  "Turkmenistan",
+  "Turks and Caicos Islands",
+  "Ukraine",
+  "United Arab Emirates",
+  "United Kingdom",
+  "United States",
+  "Uruguay",
+  "Uzbekistan",
+  "Vanuatu",
+  "Vietnam",
+  "Virgin Islands (British)",
+  "Virgin Islands (U.S.)",
+  "Western Sahara",
+];
